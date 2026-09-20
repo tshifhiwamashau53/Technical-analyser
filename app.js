@@ -62,13 +62,11 @@ function analysePixels(){
 
   for(let k=0;k<bins;k++){
     let weightedY=0,weight=0;
-    const x0=Math.floor(k*w/bins),x1=Math.min(w,Math.floor((k+1)*w/bins));
     for(let y=0;y<h;y+=2){
       const q=yActivity[y];
       if(q>0){weightedY+=y*q;weight+=q}
     }
-    if(weight)priceY[k]=weightedY/weight;
-    else priceY[k]=h/2;
+    priceY[k]=weight?weightedY/weight:h/2;
   }
 
   const smooth=a=>{
@@ -81,9 +79,8 @@ function analysePixels(){
     return out;
   };
 
-  const pu=smooth(up),pd=smooth(down),pa=smooth(activity);
+  const pu=smooth(up),pd=smooth(down);
 
-  // Horizontal activity profile: a visual proxy for the chart's high-interest price area.
   let pocY=h/2,pocScore=-1;
   for(let y=Math.floor(h*.08);y<Math.floor(h*.92);y+=2){
     const score=yActivity[y]+(y>1?yActivity[y-1]:0)+(y<h-1?yActivity[y+1]:0);
@@ -97,10 +94,10 @@ function analysePixels(){
     if(Number.isFinite(yy)){rangeTop=Math.min(rangeTop,yy);rangeBottom=Math.max(rangeBottom,yy)}
   }
   if(rangeTop===h){rangeTop=pocY-h*.07;rangeBottom=pocY+h*.07}
+
   const rangePad=Math.max(10,h*.018);
   rangeTop=Math.max(5,rangeTop-rangePad);
   rangeBottom=Math.min(h-5,rangeBottom+rangePad);
-  const rangeMid=(rangeTop+rangeBottom)/2;
 
   const recentStart=Math.floor(bins*.72);
   const priorStart=Math.floor(bins*.52);
@@ -111,7 +108,6 @@ function analysePixels(){
   const latestAvg=avg(priceY.slice(Math.floor(bins*.88)));
   const midAvg=avg(priceY.slice(Math.floor(bins*.68),Math.floor(bins*.80)));
 
-  // In screenshots, smaller Y means higher price.
   const bullishBreak=latestAvg<rangeTop;
   const bearishBreak=latestAvg>rangeBottom;
   const bullishPull=midAvg<=rangeTop+rangePad*2&&latestAvg<midAvg;
@@ -125,13 +121,26 @@ function analysePixels(){
     if(k>=rangeStart&&k<=rangeEnd){rangeBull+=pu[k];rangeBear+=pd[k]}
   }
 
-  // Mirrored structure scores. No green/red total is used as the final signal.
   const longScore=(bullishBreak?3:0)+(bullishPull?3:0)+(bullishTrend?2:0)+(recentBull>recentBear*1.05?1:0)+(rangeBull>=rangeBear*.75?1:0);
   const shortScore=(bearishBreak?3:0)+(bearishPull?3:0)+(bearishTrend?2:0)+(recentBear>recentBull*1.05?1:0)+(rangeBear>=rangeBull*.75?1:0);
 
   let direction="WAIT";
   if(longScore>=6&&longScore>=shortScore+2)direction="LONG";
   else if(shortScore>=6&&shortScore>=longScore+2)direction="SHORT";
+
+  // WAIT now means there is still a plan. Pick the stronger side as the setup to watch.
+  const pendingSetup=longScore>shortScore?"LONG":shortScore>longScore?"SHORT":"BOTH";
+  const pendingEntryY=pendingSetup==="LONG"?rangeTop:pendingSetup==="SHORT"?rangeBottom:pocY;
+  const pendingStopY=pendingSetup==="LONG"
+    ?Math.min(h-12,rangeBottom+Math.max(14,h*.025))
+    :pendingSetup==="SHORT"
+      ?Math.max(12,rangeTop-Math.max(14,h*.025))
+      :pocY;
+  const pendingTargetY=pendingSetup==="LONG"
+    ?Math.max(12,pendingEntryY-(pendingStopY-pendingEntryY)*2)
+    :pendingSetup==="SHORT"
+      ?Math.min(h-12,pendingEntryY+(pendingEntryY-pendingStopY)*2)
+      :pocY;
 
   const confidence=direction==="WAIT"?0:Math.min(95,Math.round(58+Math.abs(longScore-shortScore)*5));
 
@@ -151,14 +160,14 @@ function analysePixels(){
   }
 
   return{
-    w,h,pY:pocY,rangeTop,rangeBottom,rangeMid,breakoutY,pullbackY,entryY,slY,tpY,
+    w,h,pY:pocY,rangeTop,rangeBottom,breakoutY,pullbackY,entryY,slY,tpY,
+    pendingSetup,pendingEntryY,pendingStopY,pendingTargetY,
     direction,confidence,longScore,shortScore,
     accum:(rangeBottom-rangeTop)>h*.025?"Detected":"Possible",
-    poc:"Visual POC area",
-    breakout:direction==="WAIT"?"Structure unclear":direction==="LONG"?"Bullish breakout":"Bearish breakout",
-    pullback:direction==="WAIT"?"Not confirmed":direction==="LONG"?"Pullback toward value":"Pullback toward value",
-    continuation:direction==="WAIT"?"Not confirmed":direction==="LONG"?"Bullish continuation":"Bearish continuation",
-    bias:direction==="WAIT"?"Mixed / unclear":direction==="LONG"?"Bullish":"Bearish"
+    breakout:direction==="WAIT"?"Waiting for "+(pendingSetup==="BOTH"?"a directional breakout":pendingSetup.toLowerCase()+" breakout"):direction==="LONG"?"Bullish breakout":"Bearish breakout",
+    pullback:direction==="WAIT"?"After breakout, wait for pullback toward POC/value":direction==="LONG"?"Pullback toward value":"Pullback toward value",
+    continuation:direction==="WAIT"?"Then wait for continuation in the setup direction":direction==="LONG"?"Bullish continuation":"Bearish continuation",
+    bias:direction==="WAIT"?"Waiting for confirmation":direction==="LONG"?"Bullish":"Bearish"
   };
 }
 
@@ -175,13 +184,19 @@ function render(a){
   d.textContent=a.direction;
   d.className="direction "+a.direction.toLowerCase();
 
-  set("entry",a.direction==="WAIT"?"Wait for confirmation":"Marked on chart");
-  set("invalid",a.direction==="WAIT"?"—":"Marked on chart");
-  set("target",a.direction==="WAIT"?"—":"Marked on chart");
+  if(a.direction==="WAIT"){
+    set("entry",a.pendingSetup==="BOTH"?"Wait for LONG or SHORT breakout":"Wait for "+a.pendingSetup+" trigger at marked entry");
+    set("invalid","Marked pending setup");
+    set("target","Marked pending setup");
+  }else{
+    set("entry","Marked on chart");
+    set("invalid","Marked on chart");
+    set("target","Marked on chart");
+  }
 
   document.getElementById("summary").textContent=
     a.direction==="WAIT"
-      ?"No clean accumulation → breakout → pullback → continuation sequence was detected."
+      ?"WAIT: "+(a.pendingSetup==="BOTH"?"both directions need confirmation":a.pendingSetup+" setup is forming. Wait for the marked breakout/entry, then pullback and continuation.")
       :"Detected a "+a.direction.toLowerCase()+" structure using accumulation, breakout, pullback and continuation geometry.";
 }
 
@@ -212,7 +227,6 @@ function drawOverlay(a){
   ctx.fillStyle="#8ab4ff";
   ctx.fillText("POC",12,Math.max(18,a.pY-8));
 
-  // Show the detected accumulation/value area even when there is no trade signal.
   ctx.fillStyle="#8ab4ff18";
   ctx.strokeStyle="#8ab4ff";
   ctx.lineWidth=2;
@@ -222,9 +236,28 @@ function drawOverlay(a){
   ctx.fillText("ACCUMULATION / VALUE",w*.09,Math.max(18,a.rangeTop-7));
 
   if(!isLong&&!isShort){
+    const pendingColor=a.pendingSetup==="SHORT"?"#e59a9a":a.pendingSetup==="LONG"?"#79d6a4":"#8ab4ff";
+    ctx.fillStyle=pendingColor;
     ctx.font="900 15px system-ui";
-    ctx.fillStyle=accent;
-    ctx.fillText("WAIT — STRUCTURE NOT CLEAR",w*.08,Math.min(h-16,a.rangeBottom+28));
+    ctx.fillText(
+      a.pendingSetup==="BOTH"?"WAIT — WAITING FOR DIRECTION": "WAIT — WATCH "+a.pendingSetup+" SETUP",
+      w*.08,Math.min(h-16,a.rangeBottom+28)
+    );
+
+    if(a.pendingSetup!=="BOTH"){
+      drawLevel(a.pendingEntryY,"ENTRY TRIGGER",pendingColor,true);
+      drawLevel(a.pendingStopY,"INVALIDATION",pendingColor,true);
+      drawLevel(a.pendingTargetY,"TARGET",pendingColor,true);
+      ctx.font="800 12px system-ui";
+      ctx.fillStyle=pendingColor;
+      ctx.fillText(
+        a.pendingSetup==="LONG"?"LONG: breakout above value → pullback → continuation":"SHORT: breakout below value → pullback → continuation",
+        w*.08,Math.min(h-34,a.rangeBottom+46)
+      );
+    }else{
+      drawLevel(a.pY,"WAIT / POC",pendingColor,true);
+    }
+
     ctx.restore();
     return;
   }
